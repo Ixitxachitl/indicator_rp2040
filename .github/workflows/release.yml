@@ -1,13 +1,13 @@
 name: Release
 
+# The tag is the single trigger. Every release has a tag, and creating a release
+# in the UI creates that tag, which fires this same push event. A 'release'
+# trigger would therefore only ever duplicate the run and get cancelled.
+# To release from a tag that predates this workflow, use workflow_dispatch.
 on:
   push:
     tags:
       - "v*"
-  # 'published' only: GitHub fires both 'created' and 'published' for a single
-  # release, which would otherwise start two identical runs.
-  release:
-    types: [published]
   workflow_dispatch:
     inputs:
       tag:
@@ -17,11 +17,10 @@ on:
 permissions:
   contents: write
 
-# Tagging and releasing are two events for one intent, so both triggers can fire
-# for the same tag. Collapse them: the run is idempotent (the release is created
-# if absent, updated if present), so the newest event supersedes the older run.
+# Re-tagging supersedes an in-flight run for the same tag. Safe: the job is
+# idempotent, creating the release if absent and updating it if present.
 concurrency:
-  group: release-${{ github.event.release.tag_name || github.ref_name || inputs.tag }}
+  group: release-${{ inputs.tag || github.ref_name }}
   cancel-in-progress: true
 
 jobs:
@@ -32,7 +31,7 @@ jobs:
       - name: Resolve tag and version
         id: version
         env:
-          TAG: ${{ github.event.release.tag_name || inputs.tag || github.ref_name }}
+          TAG: ${{ inputs.tag || github.ref_name }}
         run: |
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
@@ -86,13 +85,27 @@ jobs:
           path: dist/${{ steps.bundle.outputs.name }}.zip
           if-no-files-found: error
 
+      # Creating a release in the UI also creates its tag, so this run may be
+      # attaching assets to a release that already has notes someone wrote.
+      - name: Check whether the release already exists
+        id: existing
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "found=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "found=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Publish release
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ steps.version.outputs.tag }}
-          # Only author the notes when this run is what creates the release.
-          # A release-triggered run must not overwrite notes that already exist.
-          generate_release_notes: ${{ github.event_name != 'release' }}
+          # Only author notes when this run is what creates the release,
+          # so existing notes are never overwritten.
+          generate_release_notes: ${{ steps.existing.outputs.found == 'false' }}
           draft: false
           fail_on_unmatched_files: true
           files: |
