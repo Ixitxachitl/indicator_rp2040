@@ -4,8 +4,10 @@ on:
   push:
     tags:
       - "v*"
+  # 'published' only: GitHub fires both 'created' and 'published' for a single
+  # release, which would otherwise start two identical runs.
   release:
-    types: [created, published]
+    types: [published]
   workflow_dispatch:
     inputs:
       tag:
@@ -15,9 +17,12 @@ on:
 permissions:
   contents: write
 
+# Tagging and releasing are two events for one intent, so both triggers can fire
+# for the same tag. Collapse them: the run is idempotent (the release is created
+# if absent, updated if present), so the newest event supersedes the older run.
 concurrency:
   group: release-${{ github.event.release.tag_name || github.ref_name || inputs.tag }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   build:
