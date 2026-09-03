@@ -499,7 +499,10 @@ void setup() {
   delay(500);
 
   Serial.printf(SENSECAP, VERSION);
-  beep_on(50);
+  // A two-note chirp at boot: audible proof the co-processor came up, and
+  // that the melody path works before anything asks it for a tune
+  static const BeepNote hello[] = {{1760, 60}, {0, 40}, {2637, 90}};
+  beep_play(hello, sizeof(hello) / sizeof(hello[0]), false);
 
   // Announce ourselves: the main firmware may have finished its own boot
   // (and its peripheral scan) while we were still starting, and it has no
@@ -517,10 +520,7 @@ void loop() {
   // watchdog: this loop must never stall, all blocking work is on core1
   rp2040.wdt_reset();
 
-  if (buzz_off != 0 && (int32_t)(millis() - buzz_off) >= 0) {
-    beep_off();
-    buzz_off = 0;
-  }
+  beep_loop();
 
   gps_tx_drain();
   mt_loop();

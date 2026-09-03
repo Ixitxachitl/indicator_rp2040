@@ -133,14 +133,19 @@ bool mt_handle_packet(size_t payload_len) {
       nmea_callback(message.data.nmea);
     return true;
 
-  case meshtastic_InterdeviceMessage_beep_tag:
-    // Handle the beep command
-    if (message.data.beep > 0) {
-      beep_on(message.data.beep);
-    } else {
-      beep_off();
+  case meshtastic_InterdeviceMessage_beep_tag: {
+    // A melody arrives whole, so playback needs nothing from the link once
+    // it starts: the notes are copied out of the decode buffer, which the
+    // next frame overwrites
+    const meshtastic_Beep &beep = message.data.beep;
+    BeepNote notes[sizeof(beep.notes) / sizeof(beep.notes[0])];
+    for (pb_size_t i = 0; i < beep.notes_count; i++) {
+      notes[i].frequency = beep.notes[i].frequency;
+      notes[i].duration_ms = beep.notes[i].duration_ms;
     }
+    beep_play(notes, beep.notes_count, beep.append);
     return true;
+  }
   case meshtastic_InterdeviceMessage_i2c_transaction_tag: {
     // Execute a tunneled I2C transaction: an optional write followed by an
     // optional read with repeated start
