@@ -104,6 +104,35 @@ static uint64_t file_size_of(const char *path) {
   return size;
 }
 
+// Whether path names an existing directory.
+static bool is_directory(const char *path) {
+  File f = SD.open(path, FILE_READ);
+  const bool dir = f && f.isDirectory();
+  if (f)
+    f.close();
+  return dir;
+}
+
+// Creates every missing directory along path, one level at a time, up to and
+// including the last component when whole is true, else only its parents.
+static bool make_dirs(const char *path, bool whole) {
+  char prefix[sizeof(meshtastic_FileTransfer::filepath)];
+  strncpy(prefix, path, sizeof(prefix) - 1);
+  prefix[sizeof(prefix) - 1] = '\0';
+  const size_t len = strlen(prefix);
+  for (size_t i = 1; i <= len; i++) {
+    if (prefix[i] != '/' && !(whole && i == len))
+      continue;
+    const char saved = prefix[i];
+    prefix[i] = '\0';
+    const bool ok = SD.exists(prefix) || SD.mkdir(prefix);
+    prefix[i] = saved;
+    if (!ok)
+      return false;
+  }
+  return true;
+}
+
 // Parse a packet that came in, and handle it. Return true if we were able to
 // parse it.
 bool mt_handle_packet(size_t payload_len) {
@@ -278,6 +307,9 @@ bool mt_handle_packet(size_t payload_len) {
         }
       }
       File f = SD.open(request.filepath, FILE_WRITE); // append mode, creates
+      if (!f && request.operation == meshtastic_FileOperation_POST &&
+          make_dirs(request.filepath, false))
+        f = SD.open(request.filepath, FILE_WRITE); // a new file in a new folder
       if (!f) {
         // a full card, a bad path and a pulled card all fail here
         out->status = meshtastic_FileStatus_FILE_IO_ERROR;
@@ -310,6 +342,18 @@ bool mt_handle_packet(size_t payload_len) {
 
     case meshtastic_FileOperation_DELETE: {
       invalidate_read_cache();
+      if (is_directory(request.filepath)) {
+        // only an empty one: the requester removes the contents first
+        if (SD.rmdir(request.filepath)) {
+          out->status = meshtastic_FileStatus_FILE_OK;
+        } else {
+          out->status = meshtastic_FileStatus_FILE_IO_ERROR;
+          strncpy(out->message, "directory not empty",
+                  sizeof(out->message) - 1);
+        }
+        count_cache_path[0] = '\0';
+        break;
+      }
       uint64_t freed = file_size_of(request.filepath);
       // idempotent: a file that is already gone is the requested outcome,
       // so a retried delete after a lost response reports OK
@@ -320,6 +364,46 @@ bool mt_handle_packet(size_t payload_len) {
         out->status = meshtastic_FileStatus_FILE_IO_ERROR;
         sd_request_verify();
         strncpy(out->message, "remove failed", sizeof(out->message) - 1);
+      }
+      count_cache_path[0] = '\0';
+      break;
+    }
+
+    case meshtastic_FileOperation_MKDIR: {
+      if (is_directory(request.filepath)) {
+        out->status = meshtastic_FileStatus_FILE_OK; // already there
+      } else if (SD.exists(request.filepath)) {
+        out->status =
+            meshtastic_FileStatus_FILE_NOT_A_FILE; // a file has the name
+      } else if (make_dirs(request.filepath, true)) {
+        out->status = meshtastic_FileStatus_FILE_OK;
+      } else {
+        out->status = meshtastic_FileStatus_FILE_IO_ERROR;
+        sd_request_verify();
+        strncpy(out->message, "mkdir failed", sizeof(out->message) - 1);
+      }
+      count_cache_path[0] = '\0';
+      break;
+    }
+
+    case meshtastic_FileOperation_RENAME: {
+      invalidate_read_cache();
+      const char *from = request.filepath, *to = request.target_path;
+      if (!SD.exists(from)) {
+        // a retried rename whose answer was lost finds it already moved
+        out->status = to[0] && SD.exists(to)
+                          ? meshtastic_FileStatus_FILE_OK
+                          : meshtastic_FileStatus_FILE_NOT_FOUND;
+      } else if (!to[0] || SD.exists(to)) {
+        out->status = meshtastic_FileStatus_FILE_IO_ERROR;
+        strncpy(out->message, to[0] ? "target exists" : "no target",
+                sizeof(out->message) - 1);
+      } else if (SD.rename(from, to)) {
+        out->status = meshtastic_FileStatus_FILE_OK;
+      } else {
+        out->status = meshtastic_FileStatus_FILE_IO_ERROR;
+        sd_request_verify();
+        strncpy(out->message, "rename failed", sizeof(out->message) - 1);
       }
       count_cache_path[0] = '\0';
       break;
@@ -379,6 +463,9 @@ bool mt_handle_packet(size_t payload_len) {
                    sizeof(out->filenames[0]), "%s%s", d.fileName().c_str(),
                    d.isDirectory() ? "/" : "");
           out->filenames_count++;
+          // from the entry already read, so sizes cost the walk nothing
+          out->sizes[out->sizes_count++] =
+              d.isDirectory() ? 0 : (uint64_t)d.fileSize();
         }
         index++;
         if (have_total && out->filenames_count >= max_names)
