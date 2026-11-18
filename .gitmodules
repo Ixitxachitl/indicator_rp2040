@@ -1,4 +1,4 @@
 [submodule "protobufs"]
 	path = protobufs
 	url = https://github.com/Ixitxachitl/meshtastic-protobufs.git
-	branch = beep-tones
+	branch = games-message-order
